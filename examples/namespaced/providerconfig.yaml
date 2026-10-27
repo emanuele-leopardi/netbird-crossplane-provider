@@ -1,0 +1,28 @@
+# A namespace scoped ProviderConfig. The credentials Secret must live in the
+# same namespace as the ProviderConfig and the managed resources that use it.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: netbird-credentials
+  namespace: default
+type: Opaque
+stringData:
+  # A NetBird personal access token (Settings -> Access tokens) starts with
+  # "nbp_". It is used verbatim as a bearer token when credentials-type is
+  # "token".
+  credentials: "nbp_REPLACE_WITH_YOUR_TOKEN"
+---
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: default
+  namespace: default
+spec:
+  management-uri: https://api.netbird.io
+  credentials-type: token
+  credentials:
+    source: Secret
+    secretRef:
+      name: netbird-credentials
+      key: credentials

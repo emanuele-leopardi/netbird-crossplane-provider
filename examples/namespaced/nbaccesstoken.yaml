@@ -1,0 +1,15 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbAccessToken
+metadata:
+  namespace: default
+  name: xplaneserviceuseraccesstokentest
+spec:
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+  forProvider:
+    expires_in: 1
+    name: test-token
+    user_id: ed306217-354e-452b-97a9-52394c93ff59
+  writeConnectionSecretToRef:
+    name: accesstokensecrettest

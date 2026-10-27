@@ -1,0 +1,12 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbNetwork
+metadata:
+  namespace: default
+  name: xplanenetworktest
+spec:
+  forProvider:
+    name: xplanenetworktest
+    description: "network test from crossplane"
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig

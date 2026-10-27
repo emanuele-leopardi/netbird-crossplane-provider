@@ -1,0 +1,22 @@
+apiVersion: meta.pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: netbird-crossplane-provider
+  annotations:
+    meta.crossplane.io/maintainer: Emanuele Leopardi <leopardiemanuele@gmail.com>
+    meta.crossplane.io/source: github.com/emanuele-leopardi/netbird-crossplane-provider
+    meta.crossplane.io/license: Apache-2.0
+    meta.crossplane.io/description: |
+      A Crossplane provider for NetBird. It manages NetBird groups, policies,
+      setup keys, networks, network resources, network routers, DNS settings,
+      nameservers, access tokens, users and accounts.
+    meta.crossplane.io/readme: |
+      This provider is a Crossplane v2 port of
+      github.com/infitx-org/netbird-crossplane-provider. Every managed resource
+      is namespace scoped and served from the netbird.m.crossplane.io API
+      group. It talks to either NetBird Cloud or a self-hosted NetBird
+      management server.
+    friendly-name.meta.crossplane.io: NetBird
+spec:
+  capabilities:
+    - SafeStart

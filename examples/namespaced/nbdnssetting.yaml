@@ -1,0 +1,14 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbDnsSetting
+metadata:
+  namespace: default
+  name: xplanednssettingtest
+spec:
+  managementPolicies:
+    - "*"
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+  forProvider:
+    disabled_management_groups:
+      - d10ksge9ejpc73adti9g

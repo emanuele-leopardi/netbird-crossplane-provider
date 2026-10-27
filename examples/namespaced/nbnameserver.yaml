@@ -1,0 +1,25 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbNameServer
+metadata:
+  namespace: default
+  name: nameservertest
+spec:
+  managementPolicies:
+    - "*"
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+  forProvider:
+    description: "test ns"
+    domains:
+      - "example.com"
+    enabled: true
+    name: nameservertest
+    nameservers:
+      - ip: "1.1.1.1"
+        ns_type: "udp"
+        port: 53
+    primary: false
+    search_domains_enabled: true
+    groups:
+      - d1vjtdj1l8qc738v57q0

@@ -1,0 +1,25 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbSetupKey
+metadata:
+  namespace: default
+  name: xplanesetupkeytest
+spec:
+  forProvider:
+    name: xplanesetupkeytest
+    allow_extra_dns_labels: false
+    type: reusable
+    # expires_in is in seconds, and 0 means the key never expires.
+    expires_in: 0
+    usage_limit: 0
+    ephemeral: false
+    # Peers that register with this key are added to these groups. Each
+    # reference is resolved to the referenced NbGroup's NetBird group ID, so
+    # the NbGroup in nbgroup.yaml must be reconciled before this resource.
+    # auto_groups_selector is an alternative way to pick groups by label.
+    auto_groups_refs:
+      - name: xplanepeergrouptest
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+  writeConnectionSecretToRef:
+    name: setupkeysecret

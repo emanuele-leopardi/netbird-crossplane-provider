@@ -1,0 +1,144 @@
+/*
+Copyright 2020 The Crossplane Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package main
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/alecthomas/kingpin/v2"
+	authv1 "k8s.io/api/authorization/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/gate"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/customresourcesgate"
+
+	"github.com/emanuele-leopardi/netbird-crossplane-provider/apis"
+	netbird "github.com/emanuele-leopardi/netbird-crossplane-provider/internal/controller/namespaced"
+	"github.com/emanuele-leopardi/netbird-crossplane-provider/internal/features"
+)
+
+func main() {
+	var (
+		app                      = kingpin.New(filepath.Base(os.Args[0]), "NetBird support for Crossplane.").DefaultEnvars()
+		debug                    = app.Flag("debug", "Run with debug logging.").Short('d').Bool()
+		leaderElection           = app.Flag("leader-election", "Use leader election for the controller manager.").Short('l').Default("false").OverrideDefaultFromEnvar("LEADER_ELECTION").Bool()
+		syncInterval             = app.Flag("sync", "How often all resources will be double-checked for drift from the desired state.").Short('s').Default("1h").Duration()
+		pollInterval             = app.Flag("poll", "How often individual resources will be checked for drift from the desired state.").Default("1m").Duration()
+		maxReconcileRate         = app.Flag("max-reconcile-rate", "The global maximum rate per second at which resources may be checked for drift from the desired state.").Default("10").Int()
+		enableManagementPolicies = app.Flag("enable-management-policies", "Enable support for Management Policies.").Default("true").Envar("ENABLE_MANAGEMENT_POLICIES").Bool()
+	)
+	kingpin.MustParse(app.Parse(os.Args[1:]))
+
+	zl := zap.New(zap.UseDevMode(*debug))
+	log := logging.NewLogrLogger(zl.WithName("netbird-crossplane-provider"))
+	// SetLogger is required starting with controller-runtime 0.15.0.
+	ctrl.SetLogger(zl)
+
+	cfg, err := ctrl.GetConfig()
+	kingpin.FatalIfError(err, "Cannot get API server rest config")
+
+	mgr, err := ctrl.NewManager(ratelimiter.LimitRESTConfig(cfg, *maxReconcileRate), ctrl.Options{
+		// SyncPeriod moved out of ctrl.Options in controller-runtime v0.16.0.
+		Cache: cache.Options{
+			SyncPeriod: syncInterval,
+		},
+
+		// controller-runtime uses both ConfigMaps and Leases for leader
+		// election by default. Leases expire after 15 seconds, with a
+		// 10 second renewal deadline. We've observed leader loss due to
+		// renewal deadlines being exceeded when under high load - i.e.
+		// hundreds of reconciles per second and ~200rps to the API
+		// server. Switching to Leases only and longer leases appears to
+		// alleviate this.
+		LeaderElection:             *leaderElection,
+		LeaderElectionID:           "crossplane-leader-election-netbird-crossplane-provider",
+		LeaderElectionResourceLock: resourcelock.LeasesResourceLock,
+		LeaseDuration:              func() *time.Duration { d := 60 * time.Second; return &d }(),
+		RenewDeadline:              func() *time.Duration { d := 50 * time.Second; return &d }(),
+	})
+	kingpin.FatalIfError(err, "Cannot create controller manager")
+	kingpin.FatalIfError(apis.AddToScheme(mgr.GetScheme()), "Cannot add NetBird APIs to scheme")
+
+	o := controller.Options{
+		Logger:                  log,
+		MaxConcurrentReconciles: *maxReconcileRate,
+		PollInterval:            *pollInterval,
+		GlobalRateLimiter:       ratelimiter.NewGlobal(*maxReconcileRate),
+		Features:                &feature.Flags{},
+	}
+
+	if *enableManagementPolicies {
+		o.Features.Enable(features.EnableBetaManagementPolicies)
+		log.Info("Beta feature enabled", "flag", features.EnableBetaManagementPolicies)
+	}
+
+	ctx := ctrl.SetupSignalHandler()
+
+	// Controllers are gated on the establishment of the CRDs they serve. The
+	// gate only works if we're able to watch CRDs; if we're not we fall back
+	// to starting every controller immediately.
+	canSafeStart, err := canWatchCRD(ctx, mgr)
+	kingpin.FatalIfError(err, "SafeStart precheck failed")
+	if canSafeStart {
+		crdGate := new(gate.Gate[schema.GroupVersionKind])
+		o.Gate = crdGate
+		kingpin.FatalIfError(customresourcesgate.Setup(mgr, o), "Cannot setup CRD gate")
+		kingpin.FatalIfError(netbird.SetupGated(mgr, o), "Cannot setup NetBird controllers")
+	} else {
+		log.Info("Provider has missing RBAC permissions for watching CRDs, controller SafeStart capability will be disabled")
+		kingpin.FatalIfError(netbird.Setup(mgr, o), "Cannot setup NetBird controllers")
+	}
+	kingpin.FatalIfError(mgr.Start(ctx), "Cannot start controller manager")
+}
+
+func canWatchCRD(ctx context.Context, mgr manager.Manager) (bool, error) {
+	if err := authv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return false, err
+	}
+	verbs := []string{"get", "list", "watch"}
+	for _, verb := range verbs {
+		sar := &authv1.SelfSubjectAccessReview{
+			Spec: authv1.SelfSubjectAccessReviewSpec{
+				ResourceAttributes: &authv1.ResourceAttributes{
+					Group:    "apiextensions.k8s.io",
+					Resource: "customresourcedefinitions",
+					Verb:     verb,
+				},
+			},
+		}
+		if err := mgr.GetClient().Create(ctx, sar); err != nil {
+			return false, errors.Wrapf(err, "unable to perform RBAC check for verb %s on CustomResourceDefinitions", verb)
+		}
+		if !sar.Status.Allowed {
+			return false, nil
+		}
+	}
+	return true, nil
+}

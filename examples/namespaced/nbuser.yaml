@@ -1,0 +1,33 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbUser
+metadata:
+  namespace: default
+  name: xplaneusertest
+spec:
+  managementPolicies:
+    - "Observe"
+    - "Update"
+    - "Create"
+    - "LateInitialize"
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+  forProvider:
+    email: david@infitx.com
+    is_service_user: false
+    role: admin
+---
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbUser
+metadata:
+  namespace: default
+  name: xplaneserviceusertest
+spec:
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+  forProvider:
+    name: testserviceuser
+    is_service_user: true
+    role: admin
+    auto_groups: []

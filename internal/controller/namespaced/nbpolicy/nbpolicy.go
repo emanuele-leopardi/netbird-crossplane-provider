@@ -1,0 +1,512 @@
+/*
+Copyright 2022 The Crossplane Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package nbpolicy
+
+import (
+	"context"
+	"reflect"
+
+	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/ratelimiter"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	"github.com/go-logr/logr"
+	"github.com/google/go-cmp/cmp"
+	nbapi "github.com/netbirdio/netbird/management/server/http/api"
+	"github.com/pkg/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/emanuele-leopardi/netbird-crossplane-provider/apis/namespaced/v1alpha1"
+	"github.com/emanuele-leopardi/netbird-crossplane-provider/internal/controller/namespaced/nb"
+	"github.com/emanuele-leopardi/netbird-crossplane-provider/internal/features"
+)
+
+const (
+	errNotNbPolicy  = "managed resource is not a NbPolicy custom resource"
+	errTrackPCUsage = "cannot track ProviderConfig usage"
+	errGetPC        = "cannot get ProviderConfig"
+	errGetCreds     = "cannot get credentials"
+)
+
+// Setup adds a controller that reconciles NbPolicy managed resources.
+func Setup(mgr ctrl.Manager, o controller.Options) error {
+	name := managed.ControllerName(v1alpha1.NbPolicyGroupKind)
+
+	reconcilerOptions := []managed.ReconcilerOption{
+		managed.WithExternalConnector(&connector{
+			SharedConnector: nb.NewSharedConnector(
+				mgr.GetClient(),
+				resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
+			),
+		}),
+		managed.WithLogger(o.Logger.WithValues("controller", name)),
+		managed.WithPollInterval(o.PollInterval),
+		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
+	}
+	if o.Features.Enabled(features.EnableBetaManagementPolicies) {
+		reconcilerOptions = append(reconcilerOptions, managed.WithManagementPolicies())
+	}
+
+	r := managed.NewReconciler(mgr,
+		resource.ManagedKind(v1alpha1.NbPolicyGroupVersionKind),
+		reconcilerOptions...,
+	)
+
+	return ctrl.NewControllerManagedBy(mgr).
+		Named(name).
+		WithOptions(o.ForControllerRuntime()).
+		WithEventFilter(resource.DesiredStateChanged()).
+		For(&v1alpha1.NbPolicy{}).
+		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
+}
+
+// SetupGated adds a controller that reconciles NbPolicy managed resources once
+// the provider has verified that their CRDs are established.
+func SetupGated(mgr ctrl.Manager, o controller.Options) error {
+	o.Gate.Register(func() {
+		if err := Setup(mgr, o); err != nil {
+			mgr.GetLogger().Error(err, "unable to setup reconciler", "gvk", v1alpha1.NbPolicyGroupVersionKind.String())
+		}
+	}, v1alpha1.NbPolicyGroupVersionKind)
+	return nil
+}
+
+// A connector is expected to produce an ExternalClient when its Connect method
+// is called.
+type connector struct {
+	*nb.SharedConnector
+}
+
+// Connect typically produces an ExternalClient by:
+// 1. Tracking that the managed resource is using a ProviderConfig.
+// 2. Getting the managed resource's ProviderConfig.
+// 3. Getting the credentials specified by the ProviderConfig.
+// 4. Using the credentials to form a client.
+func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
+	cr, ok := mg.(*v1alpha1.NbPolicy)
+	if !ok {
+		return nil, errors.New(errNotNbPolicy)
+	}
+
+	authManager, err := c.SharedConnector.Connect(ctx, cr)
+	if err != nil {
+		return nil, err
+	}
+
+	return &external{
+		authManager: authManager,
+		log:         ctrl.Log.WithName("provider-nbpolicy"),
+	}, nil
+}
+
+// An ExternalClient observes, then either creates, updates, or deletes an
+// external resource to ensure it reflects the managed resource's desired state.
+type external struct {
+	authManager *nb.AuthManager
+	log         logr.Logger
+}
+
+func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
+	cr, ok := mg.(*v1alpha1.NbPolicy)
+	if !ok {
+		return managed.ExternalObservation{}, errors.New(errNotNbPolicy)
+	}
+	client, err := c.authManager.GetClient(ctx)
+	if err != nil {
+		return managed.ExternalObservation{}, errors.Wrap(err, "failed to get authenticated client")
+	}
+	c.log.Info("Observing", "cr", cr)
+
+	externalName := meta.GetExternalName(cr)
+	// Adoption pattern: if externalName is blank or matches cr.Name, try to find by Name
+	if externalName == "" || externalName == cr.Name {
+		c.log.Info("external name blank or matches resource name, attempting adoption by Name", "name", cr.Spec.ForProvider.Name)
+		policies, err := client.Policies.List(ctx)
+		if err != nil {
+			if nb.IsTokenInvalidError(err) {
+				if refreshErr := c.authManager.ForceRefresh(ctx); refreshErr != nil {
+					c.log.Error(refreshErr, "failed to force token refresh")
+				}
+				return managed.ExternalObservation{}, err
+			}
+			c.log.Info("failed to list policies")
+			return managed.ExternalObservation{
+				ResourceExists: false,
+			}, nil // return nil so that observe can return without error so that it passes to create.
+		}
+		for _, apipolicy := range policies {
+			if apipolicy.Name == cr.Spec.ForProvider.Name {
+				c.log.Info("found existing policy for adoption", "policyid", apipolicy.Id)
+				meta.SetExternalName(cr, *apipolicy.Id)
+				return managed.ExternalObservation{
+					ResourceExists:   true,
+					ResourceUpToDate: false, // force a requeue for a fresh Observe
+				}, nil
+			}
+		}
+		// Not found, resource does not exist
+		return managed.ExternalObservation{ResourceExists: false}, nil
+	}
+
+	policy, err := client.Policies.Get(ctx, externalName)
+	if err != nil {
+		if nb.IsTokenInvalidError(err) {
+			if refreshErr := c.authManager.ForceRefresh(ctx); refreshErr != nil {
+				c.log.Error(refreshErr, "failed to force token refresh")
+			}
+			return managed.ExternalObservation{}, err
+		}
+		c.log.Info("failed to get policy")
+		return managed.ExternalObservation{
+			ResourceExists: false,
+		}, nil // return nil so that observe can return without error so that it passes to create.
+	}
+	uptodate := IsApiToNBPolicyUpToDate(cr.Spec.ForProvider, policy, c)
+	cr.Status.AtProvider = v1alpha1.NbPolicyObservation{
+		Id:                  policy.Id,
+		Enabled:             policy.Enabled,
+		Description:         policy.Description,
+		Name:                policy.Name,
+		Rules:               ApiToNBRules(policy.Rules),
+		SourcePostureChecks: &policy.SourcePostureChecks,
+	}
+
+	cr.Status.SetConditions(xpv2.Available())
+
+	return managed.ExternalObservation{
+		ResourceExists:   true,
+		ResourceUpToDate: uptodate,
+	}, nil
+}
+
+func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
+	cr, ok := mg.(*v1alpha1.NbPolicy)
+	if !ok {
+		return managed.ExternalCreation{}, errors.New(errNotNbPolicy)
+	}
+	client, err := c.authManager.GetClient(ctx)
+	if err != nil {
+		return managed.ExternalCreation{}, errors.Wrap(err, "failed to get authenticated client")
+	}
+	c.log.Info("Creating", "cr", cr)
+	groups, err := client.Groups.List(ctx)
+	if err != nil {
+		return managed.ExternalCreation{}, err
+	}
+	rules, err := NbToApiRules(&cr.Spec.ForProvider.Rules, groups)
+	if err != nil {
+		return managed.ExternalCreation{}, err
+	}
+	policy, err := client.Policies.Create(ctx, nbapi.PostApiPoliciesJSONRequestBody{
+		Name:                cr.Spec.ForProvider.Name,
+		Description:         cr.Spec.ForProvider.Description,
+		Enabled:             cr.Spec.ForProvider.Enabled,
+		SourcePostureChecks: cr.Spec.ForProvider.SourcePostureChecks,
+		Rules:               rules,
+	})
+	if err != nil {
+		return managed.ExternalCreation{
+			// Optionally return any details that may be required to connect to the
+			// external resource. These will be stored as the connection secret.
+			ConnectionDetails: managed.ConnectionDetails{},
+		}, err
+	}
+	meta.SetExternalName(cr, *policy.Id)
+	return managed.ExternalCreation{
+		ConnectionDetails: managed.ConnectionDetails{},
+	}, nil
+}
+
+func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
+	cr, ok := mg.(*v1alpha1.NbPolicy)
+	if !ok {
+		return managed.ExternalUpdate{}, errors.New(errNotNbPolicy)
+	}
+	client, err := c.authManager.GetClient(ctx)
+	if err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, "failed to get authenticated client")
+	}
+	c.log.Info("Updating", "cr", cr)
+	policyid := meta.GetExternalName(cr)
+	groups, err := client.Groups.List(ctx)
+	if err != nil {
+		return managed.ExternalUpdate{
+			// Optionally return any details that may be required to connect to the
+			// external resource. These will be stored as the connection secret.
+			ConnectionDetails: managed.ConnectionDetails{},
+		}, err
+	}
+	rules, err := NbToApiRules(&cr.Spec.ForProvider.Rules, groups)
+	if err != nil {
+		return managed.ExternalUpdate{
+			// Optionally return any details that may be required to connect to the
+			// external resource. These will be stored as the connection secret.
+			ConnectionDetails: managed.ConnectionDetails{},
+		}, err
+	}
+	if _, err := client.Policies.Update(ctx, policyid, nbapi.PutApiPoliciesPolicyIdJSONRequestBody{
+		Name:                cr.Spec.ForProvider.Name,
+		Description:         cr.Spec.ForProvider.Description,
+		Enabled:             cr.Spec.ForProvider.Enabled,
+		SourcePostureChecks: cr.Spec.ForProvider.SourcePostureChecks,
+		Rules:               rules,
+	}); err != nil {
+		return managed.ExternalUpdate{}, err
+	}
+	return managed.ExternalUpdate{
+		// Optionally return any details that may be required to connect to the
+		// external resource. These will be stored as the connection secret.
+		ConnectionDetails: managed.ConnectionDetails{},
+	}, nil
+}
+
+func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.ExternalDelete, error) {
+	cr, ok := mg.(*v1alpha1.NbPolicy)
+	if !ok {
+		return managed.ExternalDelete{}, errors.New(errNotNbPolicy)
+	}
+	client, err := c.authManager.GetClient(ctx)
+	if err != nil {
+		return managed.ExternalDelete{}, errors.Wrap(err, "failed to get authenticated client")
+	}
+	c.log.Info("Deleting", "cr", cr)
+	policyid := meta.GetExternalName(cr)
+	return managed.ExternalDelete{}, client.Policies.Delete(ctx, policyid)
+}
+
+func NbToApiRules(policyRule *[]v1alpha1.PolicyRule, groups []nbapi.Group) ([]nbapi.PolicyRuleUpdate, error) {
+	rules := make([]nbapi.PolicyRuleUpdate, len(*policyRule))
+	for i, prule := range *policyRule {
+		destinations, err := nb.ResolveOptionalGroupIDs(prule.Destinations, groups)
+		if err != nil {
+			return nil, errors.Wrapf(err, "rule %d destinations", i)
+		}
+		sources, err := nb.ResolveOptionalGroupIDs(prule.Sources, groups)
+		if err != nil {
+			return nil, errors.Wrapf(err, "rule %d sources", i)
+		}
+		rules[i] = nbapi.PolicyRuleUpdate{
+			Action:        nbapi.PolicyRuleUpdateAction(prule.Action),
+			Bidirectional: prule.Bidirectional,
+			Description:   prule.Description,
+			Destinations:  &destinations,
+			Enabled:       prule.Enabled,
+			Id:            prule.Id,
+			Name:          prule.Name,
+			PortRanges:    NbToApiPortRanges(prule.PortRanges),
+			Ports:         prule.Ports,
+			Protocol:      nbapi.PolicyRuleUpdateProtocol(prule.Protocol),
+			Sources:       &sources,
+		}
+	}
+	return rules, nil
+}
+
+func NbToApiPortRanges(rulePortRange *[]v1alpha1.RulePortRange) *[]nbapi.RulePortRange {
+	if rulePortRange == nil {
+		return nil
+	}
+	rportrange := make([]nbapi.RulePortRange, len(*rulePortRange))
+	for i, rulePort := range *rulePortRange {
+		rportrange[i] = nbapi.RulePortRange{
+			End:   rulePort.End,
+			Start: rulePort.Start,
+		}
+	}
+	return &rportrange
+}
+
+// groupRefsMatch reports whether the groups a policy rule asks for match the
+// groups NetBird reports.
+//
+// A rule may name a group or give its ID, and the API reports both for every
+// group, so a reference is matched using whichever it specifies. Order is
+// ignored. Comparing only IDs would report a policy written with names as
+// permanently drifted, and re-issue the same PUT on every reconcile.
+func groupRefsMatch(desired, actual *[]v1alpha1.GroupMinimum) bool {
+	if desired == nil || actual == nil {
+		return desired == nil && actual == nil
+	}
+	if len(*desired) != len(*actual) {
+		return false
+	}
+
+	unused := make([]v1alpha1.GroupMinimum, len(*actual))
+	copy(unused, *actual)
+
+	for _, d := range *desired {
+		found := -1
+		for i, a := range unused {
+			if d.Id != nil && a.Id != nil && *d.Id == *a.Id {
+				found = i
+				break
+			}
+			if d.Name != nil && a.Name != nil && *d.Name == *a.Name {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			return false
+		}
+		unused = append(unused[:found], unused[found+1:]...)
+	}
+	return true
+}
+
+// IsApiToNBPolicyUpToDate reports whether the API policy matches the desired
+// policy.
+//
+//nolint:gocyclo // Field-by-field comparison of a deeply nested policy rules tree.
+func IsApiToNBPolicyUpToDate(nbPolicy v1alpha1.NbPolicyParameters, policy *nbapi.Policy, c *external) bool {
+	c.log.Info("Checking if API policy is up to date", "policy", policy)
+	c.log.Info("Checking if API policy is up to date", "nbPolicy", nbPolicy)
+	if nbPolicy.Rules == nil || policy.Rules == nil {
+		c.log.Info("one of the rules is nil")
+		return false
+	}
+	policyrules := ApiToNBRules(policy.Rules)
+	if policyrules == nil || len(*policyrules) != len(nbPolicy.Rules) {
+		c.log.Info("rules length doesn't match or rules is nil")
+		return false
+	}
+	for i, policyrule := range *policyrules {
+		c.log.Info("Checking if rules is up to date", "policyrule", policyrule)
+		c.log.Info("Checking if rules is up to date", "nbPolicy.Rules[i]", nbPolicy.Rules[i])
+		if !cmp.Equal(policyrule.Description, nbPolicy.Rules[i].Description) {
+			c.log.Info("Description doesn't match")
+			return false
+		}
+		if !cmp.Equal(policyrule.Action, nbPolicy.Rules[i].Action) {
+			c.log.Info("action doesn't match")
+			return false
+		}
+		if !cmp.Equal(policyrule.Bidirectional, nbPolicy.Rules[i].Bidirectional) {
+			c.log.Info("bidirectional doesn't match")
+			return false
+		}
+		// Compare the destinations and sources as sets of group references,
+		// matching by ID or by name depending on what the spec asks for.
+		if !groupRefsMatch(nbPolicy.Rules[i].Destinations, policyrule.Destinations) {
+			c.log.Info("destinations don't match")
+			return false
+		}
+		if !groupRefsMatch(nbPolicy.Rules[i].Sources, policyrule.Sources) {
+			c.log.Info("sources don't match")
+			return false
+		}
+		// PortRanges nil check and comparison
+		if policyrule.PortRanges == nil && nbPolicy.Rules[i].PortRanges != nil {
+			c.log.Info("port ranges: API nil, spec not nil")
+			return false
+		}
+		if policyrule.PortRanges != nil && nbPolicy.Rules[i].PortRanges == nil {
+			c.log.Info("port ranges: API not nil, spec nil")
+			return false
+		}
+		if policyrule.PortRanges != nil && nbPolicy.Rules[i].PortRanges != nil {
+			// Compare each start/end pair
+			apiRanges := *policyrule.PortRanges
+			specRanges := nbPolicy.Rules[i].PortRanges
+			if len(apiRanges) != len(*specRanges) {
+				c.log.Info("port ranges length doesn't match")
+				return false
+			}
+			for j := range apiRanges {
+				if apiRanges[j].Start != (*specRanges)[j].Start || apiRanges[j].End != (*specRanges)[j].End {
+					c.log.Info("port range doesn't match", "index", j, "api", apiRanges[j], "spec", (*specRanges)[j])
+					return false
+				}
+			}
+		}
+		// Ports nil check and comparison
+		if policyrule.Ports == nil && nbPolicy.Rules[i].Ports != nil {
+			c.log.Info("ports: API nil, spec not nil")
+			return false
+		}
+		if policyrule.Ports != nil && nbPolicy.Rules[i].Ports == nil {
+			c.log.Info("ports: API not nil, spec nil")
+			return false
+		}
+		if policyrule.Ports != nil && nbPolicy.Rules[i].Ports != nil {
+			if !reflect.DeepEqual(policyrule.Ports, nbPolicy.Rules[i].Ports) {
+				c.log.Info("ports don't match")
+				return false
+			}
+		}
+	}
+	return true
+}
+func ApiToNBRules(p []nbapi.PolicyRule) *[]v1alpha1.PolicyRule {
+	rules := make([]v1alpha1.PolicyRule, len(p))
+	for i, prule := range p {
+		rules[i] = v1alpha1.PolicyRule{
+			Action:        string(prule.Action),
+			Bidirectional: prule.Bidirectional,
+			Description:   prule.Description,
+			Destinations:  ApiToNBGroupMinimums(prule.Destinations),
+			Enabled:       prule.Enabled,
+			Id:            prule.Id,
+			Name:          prule.Name,
+			PortRanges:    ApiToNBPortRanges(prule.PortRanges),
+			Ports:         prule.Ports,
+			Protocol:      string(prule.Protocol),
+			Sources:       ApiToNBGroupMinimums(prule.Sources),
+		}
+	}
+	return &rules
+}
+
+func ApiToNBPortRanges(rulePortRange *[]nbapi.RulePortRange) *[]v1alpha1.RulePortRange {
+	if rulePortRange == nil {
+		return nil
+	}
+	rportrange := make([]v1alpha1.RulePortRange, len(*rulePortRange))
+	for i, rulePort := range *rulePortRange {
+		rportrange[i] = v1alpha1.RulePortRange{
+			End:   rulePort.End,
+			Start: rulePort.Start,
+		}
+	}
+	return &rportrange
+}
+
+func ApiToNBGroupMinimums(groupMinimum *[]nbapi.GroupMinimum) *[]v1alpha1.GroupMinimum {
+	if groupMinimum == nil {
+		return nil
+	}
+	groupminimums := make([]v1alpha1.GroupMinimum, len(*groupMinimum))
+	for i, gmin := range *groupMinimum {
+		groupminimums[i] = v1alpha1.GroupMinimum{
+			Id:             &gmin.Id,
+			Name:           &gmin.Name,
+			Issued:         (*string)(gmin.Issued),
+			PeersCount:     gmin.PeersCount,
+			ResourcesCount: gmin.ResourcesCount,
+		}
+	}
+	return &groupminimums
+}
+
+// Disconnect is a no-op. The provider shares a long-lived, token-refreshing
+// HTTP client, so there is nothing to tear down between reconciles.
+func (c *external) Disconnect(_ context.Context) error {
+	return nil
+}

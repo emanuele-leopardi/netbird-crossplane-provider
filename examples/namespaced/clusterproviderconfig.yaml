@@ -1,0 +1,32 @@
+# A cluster scoped ProviderConfig. It can be referenced by managed resources in
+# any namespace with:
+#
+#   spec:
+#     providerConfigRef:
+#       name: default
+#       kind: ClusterProviderConfig
+#
+# The credentials Secret is namespaced and may live anywhere.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: netbird-credentials
+  namespace: crossplane-system
+type: Opaque
+stringData:
+  credentials: "nbp_REPLACE_WITH_YOUR_TOKEN"
+---
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: ClusterProviderConfig
+metadata:
+  name: default
+spec:
+  management-uri: https://api.netbird.io
+  credentials-type: token
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: netbird-credentials
+      key: credentials

@@ -1,0 +1,37 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbNetworkResource
+metadata:
+  namespace: default
+  name: xplaneresourcetest
+spec:
+  forProvider:
+    description: "test network resource"
+    enabled: true
+    name: testnetworkresource
+    groups:
+      - name: "cc-internal"
+    address: "10.10.10.0/24"
+    network_name: ccinfra05
+
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+---
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbNetworkResource
+metadata:
+  namespace: default
+  name: xplaneresourcetest2
+spec:
+  forProvider:
+    description: "test network resource2"
+    enabled: true
+    name: testnetworkresource2
+    groups:
+      - name: "cc-internal"
+    address: "10.10.11.0/24"
+    network_name: xplanenetworktest
+
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig

@@ -1,0 +1,25 @@
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbPolicy
+metadata:
+  namespace: default
+  name: xplanepolicytest2
+spec:
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+  forProvider:
+    description: test policy2
+    enabled: true
+    name: xplanepolicytest2
+    rules:
+      - name: xplanepolicytestrule2
+        action: accept
+        bidirectional: false
+        description: test rule
+        destinations:
+          - name: xplanepeergrouptest
+        enabled: true
+        sources:
+          - name: All
+        ports: ["80", "443"]
+        protocol: tcp

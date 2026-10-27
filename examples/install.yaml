@@ -1,0 +1,17 @@
+# Install the provider. Replace the package tag with the tag you published.
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: netbird-crossplane-provider
+spec:
+  package: ghcr.io/emanuele-leopardi/netbird-crossplane-provider:v1.0.0
+---
+# Optional: run the provider with debug logging.
+apiVersion: pkg.crossplane.io/v1alpha1
+kind: ControllerConfig
+metadata:
+  name: netbird-debug
+spec:
+  args:
+    - --debug

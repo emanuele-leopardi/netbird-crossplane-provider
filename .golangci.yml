@@ -1,0 +1,91 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - goconst
+    - gocritic
+    - gocyclo
+    - misspell
+    - nakedret
+    - prealloc
+    - unconvert
+    - unparam
+  settings:
+    errcheck:
+      # Report about not checking of errors in type assertions.
+      check-type-assertions: false
+      # Report about assignment of errors to blank identifier.
+      check-blank: false
+    gocritic:
+      enabled-tags:
+        - performance
+      settings:
+        captLocal:
+          paramsOnly: true
+        rangeValCopy:
+          sizeThreshold: 32
+    goconst:
+      min-len: 3
+      min-occurrences: 5
+    gocyclo:
+      min-complexity: 30
+    nakedret:
+      max-func-lines: 30
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Tests are allowed to be long and repetitive.
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - errcheck
+          - dupl
+          - gosec
+          - unparam
+      # Performance hints rather than style issues; these copy a lot of memory
+      # on purpose.
+      - text: "(hugeParam|rangeValCopy):"
+        linters:
+          - gocritic
+      # "potential hardcoded credentials" fires on any identifier containing
+      # "secret", which is everywhere in Kubernetes land.
+      - text: "G101:"
+        linters:
+          - gosec
+      # 'errors unhandled' duplicates errcheck.
+      - text: "G104:"
+        linters:
+          - gosec
+      # crossplane-runtime's event.NewAPIRecorder still takes the legacy
+      # record.EventRecorder, so the deprecated GetEventRecorderFor cannot be
+      # replaced with GetEventRecorder yet.
+      - text: "SA1019: \\(sigs.k8s.io/controller-runtime.Manager\\).GetEventRecorderFor is deprecated"
+        linters:
+          - staticcheck
+
+issues:
+  # Report every occurrence, not just the first few per linter/text.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/emanuele-leopardi/netbird-crossplane-provider
+  exclusions:
+    generated: lax

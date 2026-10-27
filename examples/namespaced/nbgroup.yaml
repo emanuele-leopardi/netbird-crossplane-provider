@@ -1,0 +1,47 @@
+# apiVersion: netbird.m.crossplane.io/v1alpha1
+# kind: NbGroup
+# metadata:
+#   name: xplanegrouptest
+# spec:
+#   forProvider:
+#     name: xplanegrouptest
+#   providerConfigRef:
+#     name: example
+# ---
+# apiVersion: netbird.m.crossplane.io/v1alpha1
+# kind: NbGroup
+# metadata:
+#   name: xplanegrouptest2
+# spec:
+#   forProvider:
+#     name: xplanegrouptest2
+#   providerConfigRef:
+#     name: example
+# ---
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbGroup
+metadata:
+  namespace: default
+  name: xplanepeergrouptest
+spec:
+  forProvider:
+    name: xplanepeergrouptest
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
+---
+apiVersion: netbird.m.crossplane.io/v1alpha1
+kind: NbGroup
+metadata:
+  namespace: default
+  annotations:
+    crossplane.io/external-name: All
+  name: all-group
+spec:
+  forProvider:
+    name: All
+  managementPolicies:
+    - Observe
+  providerConfigRef:
+    name: default
+    kind: ClusterProviderConfig
