@@ -49,6 +49,11 @@ func TestConnectionDetails(t *testing.T) {
 			setupkey: nil,
 			want:     managed.ConnectionDetails{},
 		},
+		"MaskedKey": {
+			reason: "NetBird masks the key on every read but the Create call, so republishing it would replace a usable key with a mask that cannot enrol.",
+			setupkey: &api.SetupKey{Key: "E2643****"},
+			want: managed.ConnectionDetails{},
+		},
 	}
 
 	for name, tc := range cases {
@@ -60,7 +65,7 @@ func TestConnectionDetails(t *testing.T) {
 			// The key name is a cross-repository contract: the routing peer
 			// Deployment in home-clusters reads exactly this key. Assert the
 			// name directly so that a rename fails here and not in the cluster.
-			if tc.setupkey != nil {
+			if len(tc.want) > 0 {
 				if _, ok := got["password"]; !ok {
 					t.Errorf("\n%s\nconnectionDetails(...): want a %q key, got keys %v", tc.reason, "password", keys(got))
 				}

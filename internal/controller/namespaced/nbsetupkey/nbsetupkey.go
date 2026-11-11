@@ -19,6 +19,7 @@ package nbsetupkey
 import (
 	"context"
 	"slices"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
@@ -249,8 +250,15 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 // connectionDetails returns the connection secret that reflects the setup key
 // NetBird holds. The key name is part of this provider's public interface: it
 // is what consumers read the key from, so it must not be renamed.
+//
+// NetBird returns the plaintext key exactly once, from the Create call. Every
+// later read returns it masked, as the first five characters followed by
+// asterisks ("E2643****"). Publishing that would overwrite a usable key with a
+// mask, and the routing peer that reads this secret would then fail to enrol
+// with "invalid setup-key ... invalid UUID length: 9". Publishing is additive,
+// so returning no details leaves the real key in the secret untouched.
 func connectionDetails(setupkey *api.SetupKey) managed.ConnectionDetails {
-	if setupkey == nil {
+	if setupkey == nil || strings.Contains(setupkey.Key, "*") {
 		return managed.ConnectionDetails{}
 	}
 	return managed.ConnectionDetails{
