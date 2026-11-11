@@ -11,6 +11,14 @@ env:
   GO_VERSION: '1.26'
   DOCKER_BUILDX_VERSION: 'v0.12.1'
 
+  # Single platform on purpose. With more than one, `up xpkg push` assembles a
+  # multi-arch image index and uploads it by digest. On the v1.0.0 release the
+  # blobs landed but that final tag write came back "DENIED: requested access
+  # to the resource is denied", leaving the package untagged and unusable.
+  # Publishing one platform keeps to the single-manifest path the registry is
+  # known to accept. The only consumer is an amd64 k3s node anyway.
+  PLATFORMS: 'linux_amd64'
+
   # Registry/Org names
   CROSSPLANE_REGORG: 'ghcr.io/emanuele-leopardi'
 
