@@ -50,9 +50,9 @@ func TestConnectionDetails(t *testing.T) {
 			want:     managed.ConnectionDetails{},
 		},
 		"MaskedKey": {
-			reason: "NetBird masks the key on every read but the Create call, so republishing it would replace a usable key with a mask that cannot enrol.",
+			reason:   "NetBird masks the key on every read but the Create call, so republishing it would replace a usable key with a mask that cannot enrol.",
 			setupkey: &api.SetupKey{Key: "E2643****"},
-			want: managed.ConnectionDetails{},
+			want:     managed.ConnectionDetails{},
 		},
 	}
 
