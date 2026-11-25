@@ -147,20 +147,14 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 				return managed.ExternalObservation{}, err
 			}
-			c.log.Info("failed to list networks")
-			return managed.ExternalObservation{
-				ResourceExists: false,
-			}, nil // return nil so that observe can return without error so that it passes to create.
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to list networks")
 		}
-		var apinetwork *nbapi.Network
-		for _, network := range networks {
-			if network.Name == cr.Spec.ForProvider.NetworkName {
-				apinetwork = &network
-				break
-			}
+		apinetwork, err := nb.NetworkByName(networks, cr.Spec.ForProvider.NetworkName)
+		if err != nil {
+			return managed.ExternalObservation{}, err
 		}
 		if apinetwork == nil {
-			return managed.ExternalObservation{}, errors.New("network not found")
+			return managed.ExternalObservation{}, errors.Errorf("network %q not found", cr.Spec.ForProvider.NetworkName)
 		}
 		routers, err := client.Networks.Routers(apinetwork.Id).List(ctx)
 		if err != nil {
@@ -170,10 +164,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 				return managed.ExternalObservation{}, err
 			}
-			c.log.Info("failed to list routers")
-			return managed.ExternalObservation{
-				ResourceExists: false,
-			}, nil // return nil so that observe can return without error so that it passes to create.
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to list routers")
 		}
 		for _, router := range routers {
 			if cr.Spec.ForProvider.PeerGroupName != "" {
@@ -245,20 +236,14 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("failed to list networks")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		return managed.ExternalObservation{}, errors.Wrap(err, "failed to list networks")
 	}
-	var apinetwork *nbapi.Network
-	for _, network := range networks {
-		if network.Name == cr.Spec.ForProvider.NetworkName {
-			apinetwork = &network
-			break
-		}
+	apinetwork, err := nb.NetworkByName(networks, cr.Spec.ForProvider.NetworkName)
+	if err != nil {
+		return managed.ExternalObservation{}, err
 	}
 	if apinetwork == nil {
-		return managed.ExternalObservation{}, errors.New("network not found")
+		return managed.ExternalObservation{}, errors.Errorf("network %q not found", cr.Spec.ForProvider.NetworkName)
 	}
 	networkrouter, err := client.Networks.Routers(apinetwork.Id).Get(ctx, externalName)
 	if err != nil {
@@ -268,10 +253,11 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("failed to get network router")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		if !nb.IsNotFound(err) {
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to get network router")
+		}
+		c.log.Info("network router does not exist", "external-name", externalName)
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 	if networkrouter.PeerGroups != nil && len(*networkrouter.PeerGroups) >= 1 {
 		cr.Status.AtProvider = v1alpha1.NbNetworkRouterObservation{
@@ -314,14 +300,12 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	if err != nil {
 		return managed.ExternalCreation{}, err
 	}
-	var apinetwork *nbapi.Network
-	for _, network := range networks {
-		if network.Name == cr.Spec.ForProvider.NetworkName {
-			apinetwork = &network
-		}
+	apinetwork, err := nb.NetworkByName(networks, cr.Spec.ForProvider.NetworkName)
+	if err != nil {
+		return managed.ExternalCreation{}, err
 	}
 	if apinetwork == nil {
-		return managed.ExternalCreation{}, errors.New("network not found")
+		return managed.ExternalCreation{}, errors.Errorf("network %q not found", cr.Spec.ForProvider.NetworkName)
 	}
 
 	groups, err := client.Groups.List(ctx)
@@ -392,14 +376,12 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 	if err != nil {
 		return managed.ExternalDelete{}, err
 	}
-	var apinetwork *nbapi.Network
-	for _, network := range networks {
-		if network.Name == cr.Spec.ForProvider.NetworkName {
-			apinetwork = &network
-		}
+	apinetwork, err := nb.NetworkByName(networks, cr.Spec.ForProvider.NetworkName)
+	if err != nil {
+		return managed.ExternalDelete{}, err
 	}
 	if apinetwork == nil {
-		return managed.ExternalDelete{}, errors.New("network not found")
+		return managed.ExternalDelete{}, errors.Errorf("network %q not found", cr.Spec.ForProvider.NetworkName)
 	}
 	networkrouterid := meta.GetExternalName(cr)
 	return managed.ExternalDelete{}, client.Networks.Routers(apinetwork.Id).Delete(ctx, networkrouterid)

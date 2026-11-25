@@ -146,10 +146,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 				return managed.ExternalObservation{}, err
 			}
-			c.log.Info("failed to list policies")
-			return managed.ExternalObservation{
-				ResourceExists: false,
-			}, nil // return nil so that observe can return without error so that it passes to create.
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to list policies")
 		}
 		for _, apipolicy := range policies {
 			if apipolicy.Name == cr.Spec.ForProvider.Name {
@@ -173,10 +170,11 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("failed to get policy")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		if !nb.IsNotFound(err) {
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to get policy")
+		}
+		c.log.Info("policy does not exist", "external-name", externalName)
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 	uptodate := IsApiToNBPolicyUpToDate(cr.Spec.ForProvider, policy, c)
 	cr.Status.AtProvider = v1alpha1.NbPolicyObservation{

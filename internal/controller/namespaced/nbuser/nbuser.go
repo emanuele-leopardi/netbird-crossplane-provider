@@ -148,10 +148,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 				return managed.ExternalObservation{}, err
 			}
-			c.log.Info("failed to list users")
-			return managed.ExternalObservation{
-				ResourceExists: false,
-			}, nil // return nil so that observe can return without error so that it passes to create.
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to list users")
 		}
 		var apiuser *nbapi.User
 		if !*cr.Spec.ForProvider.IsServiceUser {
@@ -205,10 +202,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 				return managed.ExternalObservation{}, err
 			}
-			c.log.Info("failed to list users")
-			return managed.ExternalObservation{
-				ResourceExists: false,
-			}, nil // return nil so that observe can return without error so that it passes to create.
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to list users")
 		}
 		var apiuser *nbapi.User
 		for _, user := range users {
@@ -248,10 +242,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("failed to list users")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		return managed.ExternalObservation{}, errors.Wrap(err, "failed to list users")
 	}
 	var user *nbapi.User
 	for _, u := range users {

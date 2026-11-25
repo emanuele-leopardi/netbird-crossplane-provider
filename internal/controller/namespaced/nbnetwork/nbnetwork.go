@@ -144,32 +144,31 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 				return managed.ExternalObservation{}, err
 			}
-			c.log.Info("failed to list networks")
-			return managed.ExternalObservation{
-				ResourceExists: false,
-			}, nil // return nil so that observe can return without error so that it passes to create.
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to list networks")
 		}
-		for _, net := range networks {
-			if net.Name == cr.Spec.ForProvider.Name {
-				meta.SetExternalName(cr, net.Id)
-				cr.Status.AtProvider = v1alpha1.NbNetworkObservation{
-					Id:                net.Id,
-					Resources:         &net.Resources,
-					Description:       net.Description,
-					Name:              net.Name,
-					Policies:          &net.Policies,
-					Routers:           &net.Routers,
-					RoutingPeersCount: net.RoutingPeersCount,
-				}
-				cr.Status.SetConditions(xpv2.Available())
-				return managed.ExternalObservation{
-					ResourceExists:   true,
-					ResourceUpToDate: false, // force requeue to persist external name
-				}, nil
-			}
+		network, err := nb.NetworkByName(networks, cr.Spec.ForProvider.Name)
+		if err != nil {
+			return managed.ExternalObservation{}, err
 		}
-		// Not found by name, treat as not existing
-		return managed.ExternalObservation{ResourceExists: false}, nil
+		if network == nil {
+			// Not found by name, treat as not existing
+			return managed.ExternalObservation{ResourceExists: false}, nil
+		}
+		meta.SetExternalName(cr, network.Id)
+		cr.Status.AtProvider = v1alpha1.NbNetworkObservation{
+			Id:                network.Id,
+			Resources:         &network.Resources,
+			Description:       network.Description,
+			Name:              network.Name,
+			Policies:          &network.Policies,
+			Routers:           &network.Routers,
+			RoutingPeersCount: network.RoutingPeersCount,
+		}
+		cr.Status.SetConditions(xpv2.Available())
+		return managed.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false, // force requeue to persist external name
+		}, nil
 	}
 
 	// If we have an external name (and it's not just the resource name), fetch by ID
@@ -181,10 +180,11 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("failed to get network")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		if !nb.IsNotFound(err) {
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to get network")
+		}
+		c.log.Info("network does not exist", "external-name", externalName)
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
 	cr.Status.AtProvider = v1alpha1.NbNetworkObservation{

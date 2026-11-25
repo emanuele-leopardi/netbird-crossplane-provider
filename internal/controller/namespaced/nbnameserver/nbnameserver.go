@@ -160,10 +160,11 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("failed to get nameserver group")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		if !nb.IsNotFound(err) {
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to get nameserver group")
+		}
+		c.log.Info("nameserver group does not exist", "external-name", externalName)
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
 	cr.Status.AtProvider = v1alpha1.NbNameServerObservation{

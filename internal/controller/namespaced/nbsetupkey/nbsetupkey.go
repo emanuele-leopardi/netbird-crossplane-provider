@@ -196,10 +196,11 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("setupkey not found")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		if !nb.IsNotFound(err) {
+			return managed.ExternalObservation{}, errors.Wrap(err, errGetSetupKey)
+		}
+		c.log.Info("setupkey does not exist", "external-name", externalName)
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
 	// The reconciler republishes whatever Observe returns as the connection

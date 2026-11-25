@@ -93,6 +93,12 @@ func IsTokenInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A 401 from the management API is the definitive answer; the string
+	// heuristics below only matter for errors raised before any call (the OAuth
+	// token exchange, for one) where there is no status code to look at.
+	if hasStatus(err, http.StatusUnauthorized) {
+		return true
+	}
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "token invalid") ||
 		strings.Contains(errStr, "unauthorized") ||
@@ -130,7 +136,14 @@ func (a *AuthManager) refreshToken(ctx context.Context) error {
 		expiresIn = 24 * time.Hour
 	}
 
-	a.client = netbird.NewWithBearerToken(a.endpoint, token)
+	// The wrapping client is what keeps the HTTP status code attached to the
+	// error. Without it every API failure reaches the controllers as a bare
+	// message, and a 500 is indistinguishable from a 404.
+	a.client = netbird.NewWithOptions(
+		netbird.WithManagementURL(a.endpoint),
+		netbird.WithBearerToken(token),
+		netbird.WithHttpClient(statusErrorClient{inner: http.DefaultClient}),
+	)
 	a.lastTokenTime = time.Now()
 	a.expiresIn = expiresIn
 	a.log.V(1).Info("Token refreshed")

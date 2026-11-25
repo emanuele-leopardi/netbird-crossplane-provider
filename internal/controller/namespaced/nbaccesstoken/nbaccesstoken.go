@@ -149,10 +149,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 				}
 				return managed.ExternalObservation{}, err
 			}
-			c.log.Info("accesskey not found")
-			return managed.ExternalObservation{
-				ResourceExists: false,
-			}, nil // return nil so that observe can return without error so that it passes to create.
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to list users")
 		}
 		var apiuser *nbapi.User
 		for _, user := range users {
@@ -180,10 +177,11 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 			}
 			return managed.ExternalObservation{}, err
 		}
-		c.log.Info("accesskey not found")
-		return managed.ExternalObservation{
-			ResourceExists: false,
-		}, nil // return nil so that observe can return without error so that it passes to create.
+		if !nb.IsNotFound(err) {
+			return managed.ExternalObservation{}, errors.Wrap(err, "failed to get access token")
+		}
+		c.log.Info("access token does not exist", "external-name", externalName)
+		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 	var lastused *string
 	if accesstoken.LastUsed != nil {
