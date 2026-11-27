@@ -289,7 +289,31 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 	return managed.ExternalDelete{}, client.Policies.Delete(ctx, policyid)
 }
 
+// NbToApiRules converts the rules of an NbPolicy into the form the NetBird
+// policy API expects.
+//
+// A policy may only describe one rule. The NetBird API accepts a list in the
+// request and echoes the same list back, but it persists only the first rule:
+// POST /api/policies with two rules returns two, and GET on the id it just
+// created returns one. Measured on NetBird Cloud with rules that differ in
+// sources, in destinations, and in both, and with three rules. So a multi-rule
+// spec would silently drop every rule after the first, and because the observed
+// rule count can then never match the spec, the reconciler would Update once a
+// minute forever while the object still reports SYNCED.
+//
+// Rather than let that happen quietly, this rejects the spec. The manifest fix
+// is one policy per rule, which is also how the account's existing policies are
+// shaped. If NetBird ever stores multiple rules, drop the check and make
+// IsApiToNbPolicyUpToDate compare the two lists as sets instead of by index.
 func NbToApiRules(policyRule *[]v1alpha1.PolicyRule, groups []nbapi.Group) ([]nbapi.PolicyRuleUpdate, error) {
+	if policyRule == nil || len(*policyRule) == 0 {
+		return nil, errors.New("a policy must declare exactly one rule, got none")
+	}
+	if len(*policyRule) > 1 {
+		return nil, errors.Errorf(
+			"the NetBird API stores only the first rule of a multi-rule policy: "+
+				"split these %d rules into one NbPolicy per rule", len(*policyRule))
+	}
 	rules := make([]nbapi.PolicyRuleUpdate, len(*policyRule))
 	for i, prule := range *policyRule {
 		destinations, err := nb.ResolveOptionalGroupIDs(prule.Destinations, groups)
